@@ -1,0 +1,2170 @@
+:: StoryTitle
+Concordia’s Cafe
+
+:: StoryData
+{
+  "ifid": "D3C30CCF-E437-47E5-AF7C-D7B1AED94C80",
+  "format": "Harlowe",
+  "format-version": "3.3.9",
+  "start": "Opening Scene",
+  "zoom": 1
+}
+
+:: Story JavaScript [script]
+/* ============================================================
+   CAFE TOUR ENGINE - local video files
+   Paste into the Twine story JavaScript pane (Story, Details)
+
+   Keep this file free of the ampersand, less-than and greater-than
+   characters. Twine escapes them on save and publish, which
+   corrupts the pane.
+   ============================================================ */
+
+(function () {
+  "use strict";
+
+  /* ---------- CONFIG ---------- */
+
+  var CONFIG = {
+    clipFolder: "clips/",
+
+    /* Links shown in the Socials tab. Replace the urls. */
+    socials: [
+      { label: "Instagram", url: "https://www.instagram.com/concordiascafebf/" },
+      { label: "Facebook", url: "https://www.facebook.com/concordiascafe" }
+    ],
+
+    /* One continuous track played by the page. Put the file at
+       music/cafe.mp3 (or change the name here). Leave empty for no track.
+       The Music on/off button controls it. */
+    music: "music/cafe.mp3",
+
+    /* Normal volume, from 0 to 1. */
+    musicVolume: 0.35,
+
+    /* Volume on particular scenes, by scene key. The menu clip has a
+       voice, so the track sits lower there. The ending fades out. */
+    musicSceneLevels: { menu: 0.12, ending: 0 }
+  };
+
+  /* ---------- SCENES ----------
+     Key goes in data-scene="" inside a passage.
+     Value is the filename inside the clips folder. */
+
+  var SCENES = {
+    opening:  "opening.mp4",
+    entering: "entering.mp4",
+    loading:  "loading.mp4",
+    loading2:    "loading-2.mp4",
+    choose:   "choose-loop.mp4",
+    line:     "waiting-in-line.mp4",
+    menu:     "food-menu.mp4",
+    orderdone: "order-done.mp4",
+    balcony:  "balcony.mp4",
+    floor2:   "2fl.mp4",
+    gfl1:     "gfl-1.mp4",
+    gfl2:     "gfl-2.mp4",
+    ending:   "ending.mp4"
+  };
+
+  /* ============================================================
+     ENGINE - no edits needed below this line
+     ============================================================ */
+
+  var video = null;
+  var currentScene = null;
+  var unlocked = false;
+  var warmed = {};
+  var holdCanvas = null;
+  var pendingThen = null;
+  var loopFrom = null;
+
+  function srcFor(key) {
+    var file = SCENES[key];
+    if (!file) { return null; }
+    return CONFIG.clipFolder + file;
+  }
+
+  function track(event, data) {
+    data = data || {};
+    data.event = event;
+    if (window.dataLayer) { window.dataLayer.push(data); }
+    console.log("[tour]", event, data);
+  }
+  window.TOUR_TRACK = track;
+
+  function clickAdvance() {
+    var link = document.querySelector(".auto-advance tw-link, .auto-advance a");
+    if (link) { link.click(); }
+  }
+
+  /* One persistent video element, outside tw-story, so Harlowe
+     rebuilding a passage never destroys it. */
+  function buildVideo() {
+    if (video) { return; }
+    video = document.createElement("video");
+    video.id = "tourVideo";
+    video.setAttribute("playsinline", "");
+    video.setAttribute("webkit-playsinline", "");
+    video.muted = true;
+    video.autoplay = true;
+    video.preload = "auto";
+    document.body.appendChild(video);
+
+    video.addEventListener("ended", function () {
+      track("scene_end", { scene: currentScene });
+      if (loopFrom !== null) { jumpToLoop(); return; }
+      if (startThen()) { return; }
+      clickAdvance();
+    });
+
+    video.addEventListener("error", function () {
+      console.warn("[tour] could not load " + CONFIG.clipFolder + SCENES[currentScene]);
+      console.warn("[tour] check the filename, and that you are on a local server");
+      releaseFrame();
+      if (startThen()) { return; }
+      clickAdvance();
+    });
+
+    setInterval(watchLoop, 50);
+  }
+
+  /* A clip can loop back to a later moment instead of the start:
+     data-loop-from="9" on the scene cue. The check runs just before
+     the end so there is no frozen last frame. */
+  function jumpToLoop() {
+    var to = Math.min(loopFrom, Math.max(0, video.duration - 1));
+    video.currentTime = to;
+    var p = video.play();
+    if (p) { if (p.catch) { p.catch(function () {}); } }
+  }
+
+  function watchLoop() {
+    if (loopFrom === null) { return; }
+    if (!video) { return; }
+    if (video.paused) { return; }
+    var left = video.duration - video.currentTime;
+    /* same as: left is 0.12 or less. Written this way because the pane
+       must not contain the less-than or greater-than characters. */
+    if (Math.min(left, 0.12) === left) { jumpToLoop(); }
+  }
+
+  /* Freeze the current picture on a canvas while the next clip loads,
+     so there is never a black flash between scenes. */
+  function holdFrame() {
+    if (!video) { return; }
+    if (video.readyState === 0 || video.readyState === 1) { return; }
+    var w = video.videoWidth;
+    var h = video.videoHeight;
+    if (!w) { return; }
+    if (!holdCanvas) {
+      holdCanvas = document.createElement("canvas");
+      holdCanvas.id = "tourHold";
+      holdCanvas.className = "tour-hold";
+      document.body.appendChild(holdCanvas);
+    }
+    holdCanvas.width = w;
+    holdCanvas.height = h;
+    try {
+      holdCanvas.getContext("2d").drawImage(video, 0, 0, w, h);
+      holdCanvas.classList.add("is-on");
+    } catch (err) {}
+  }
+
+  function releaseFrame() {
+    if (holdCanvas) { holdCanvas.classList.remove("is-on"); }
+  }
+
+  /* Let go of the held picture once the new clip is really on screen. */
+  function releaseWhenShowing() {
+    video.addEventListener("playing", function () {
+      if (video.requestVideoFrameCallback) {
+        video.requestVideoFrameCallback(function () { releaseFrame(); });
+      } else {
+        setTimeout(releaseFrame, 80);
+      }
+    }, { once: true });
+  }
+
+  /* A cue can chain a second clip that starts when the first one ends:
+     data-then, data-then-loop, data-then-reveal. */
+  function startThen() {
+    if (!pendingThen) { return false; }
+    var n = pendingThen;
+    pendingThen = null;
+    if (n.from !== currentScene) { return false; }
+    playScene(n.key, { loop: n.loop });
+    if (n.reveal) { armReveal(n.key, n.reveal); }
+    return true;
+  }
+
+  /* Pull upcoming clips into the browser cache. */
+  function warm(keys) {
+    keys.forEach(function (key) {
+      if (warmed[key]) { return; }
+      warmed[key] = true;
+      var url = srcFor(key);
+      if (!url) { return; }
+      var tag = document.createElement("link");
+      tag.rel = "prefetch";
+      tag.as = "video";
+      tag.href = url;
+      document.head.appendChild(tag);
+    });
+  }
+  window.warmScenes = warm;
+
+  function playScene(key, opts) {
+    opts = opts || {};
+    buildVideo();
+
+    var url = srcFor(key);
+    if (!url) { console.warn("[tour] unknown scene:", key); return; }
+
+    if (key === currentScene) {
+      if (!video.paused) {
+        if (!opts.force) { return; }
+      }
+    }
+
+    holdFrame();
+    video.loop = opts.loop ? true : false;
+    loopFrom = (opts.loopFrom === undefined) ? null : opts.loopFrom;
+    if (loopFrom !== null) { video.loop = false; }
+    video.src = url;
+    currentScene = key;
+    musicForScene(key);
+    track("scene_start", { scene: key, loop: video.loop });
+
+    var play = video.play();
+    if (play) {
+      if (play.catch) {
+        play.catch(function (err) { console.log("[tour] autoplay blocked:", err.name); });
+      }
+    }
+    releaseWhenShowing();
+  }
+  window.playScene = playScene;
+
+  /* Unlock audio on the first real tap (iOS and desktop autoplay rules). */
+  function unlockTour() {
+    if (unlocked) { return; }
+    unlocked = true;
+    buildVideo();
+    applySound();
+    var p = video.play();
+    if (p) {
+      if (p.catch) { p.catch(function () {}); }
+    }
+    track("tour_start", {});
+  }
+  window.unlockTour = unlockTour;
+
+  /* Capture phase on purpose: Harlowe's own link handlers can stop the
+     click before it reaches the document, which would leave sound locked
+     after the very first tap on "Step inside". */
+  document.addEventListener("click", unlockTour, { once: true, capture: true });
+  document.addEventListener("touchend", unlockTour, { once: true, capture: true });
+  document.addEventListener("keydown", unlockTour, { once: true, capture: true });
+
+  /* ============================================================
+     MENU - hamburger, Socials, Timeline tree, Music toggle
+     ============================================================ */
+
+  /* Timeline tree layout. name must match a passage name exactly. */
+  var TREE = {
+    top: [
+      { name: "Opening Scene", label: "Opening" },
+      { name: "Choose Route", label: "Choose your route" }
+    ],
+    branches: [
+      { title: "Order first", items: [
+        { name: "Waiting In Line Scene", label: "Waiting in line" },
+        { name: "Food Menu Scene", label: "Food menu" },
+        { name: "Order Done Scene", label: "Order done" }
+      ] },
+      { title: "Look around", items: [
+        { name: "Balcony Area Scene", label: "Balcony" },
+        { name: "2FL Area Scene", label: "Second floor" },
+        { name: "GFL Area 1 Scene", label: "Ground floor, one" },
+        { name: "GFL Area 2 Scene", label: "Ground floor, two" }
+      ] }
+    ],
+    bottom: [
+      { name: "Ending Scene", label: "Ending" }
+    ]
+  };
+
+  /* Passages that count as another tree stop. */
+  var ALIAS = {
+    "Only Tour Left": "Choose Route",
+    "Only Order Left": "Choose Route"
+  };
+
+  var soundOn = true;
+  var bgm = null;
+  var visited = {};
+  var currentNode = null;
+  var syncTimer = null;
+  var menuEl = null;
+  var burger = null;
+  var musicBtn = null;
+  var tabs = {};
+  var panels = {};
+  var treeNodes = {};
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) { n.className = cls; }
+    if (text) { n.textContent = text; }
+    return n;
+  }
+
+  /* ---------- background track ---------- */
+  var musicFade = null;
+
+  function levelFor(key) {
+    var lv = CONFIG.musicSceneLevels;
+    if (lv) { if (lv[key] !== undefined) { return lv[key]; } }
+    return CONFIG.musicVolume;
+  }
+
+  function stopMusic() {
+    if (musicFade) { clearInterval(musicFade); musicFade = null; }
+    if (bgm) { bgm.pause(); }
+  }
+
+  function fadeMusic(target, seconds) {
+    if (!bgm) { return; }
+    if (musicFade) { clearInterval(musicFade); musicFade = null; }
+    var from = bgm.volume;
+    var steps = Math.max(1, Math.round(seconds * 20));
+    var i = 0;
+    musicFade = setInterval(function () {
+      i = i + 1;
+      var v = from + (target - from) * (i / steps);
+      bgm.volume = Math.min(1, Math.max(0, v));
+      if (i === steps) {
+        clearInterval(musicFade);
+        musicFade = null;
+        if (target === 0) { bgm.pause(); }
+      }
+    }, 50);
+  }
+
+  /* Called on every scene change and when sound is switched on. */
+  function musicForScene(key) {
+    if (!bgm) { return; }
+    if (!unlocked) { return; }
+    if (!soundOn) { return; }
+    var target = levelFor(key);
+    var starting = bgm.paused;
+    if (starting) {
+      if (target !== 0) {
+        bgm.volume = 0;
+        var p = bgm.play();
+        if (p) { if (p.catch) { p.catch(function () {}); } }
+      }
+    }
+    fadeMusic(target, target === 0 ? 4 : (starting ? 3 : 1.5));
+  }
+  window.tourMusic = function () { return bgm; };
+
+  /* Sound is held muted until the first tap, then follows the toggle. */
+  function applySound() {
+    if (video) { video.muted = (!unlocked) || (!soundOn); }
+    if (bgm) {
+      if (unlocked) {
+        if (soundOn) { musicForScene(currentScene); }
+        else { stopMusic(); }
+      }
+    }
+    if (musicBtn) {
+      musicBtn.textContent = soundOn ? "Music on" : "Music off";
+      musicBtn.setAttribute("aria-pressed", soundOn ? "true" : "false");
+      musicBtn.classList.toggle("is-off", !soundOn);
+    }
+  }
+
+  function menuIsOpen() { return menuEl.classList.contains("is-open"); }
+
+  function showPanel(name) {
+    ["socials", "tree"].forEach(function (k) {
+      var on = (k === name);
+      panels[k].classList.toggle("is-open", on);
+      tabs[k].classList.toggle("is-on", on);
+      tabs[k].setAttribute("aria-expanded", on ? "true" : "false");
+    });
+  }
+
+  function setMenu(open) {
+    menuEl.classList.toggle("is-open", open);
+    burger.setAttribute("aria-expanded", open ? "true" : "false");
+    if (!open) { showPanel(null); }
+  }
+
+  function refreshTree() {
+    Object.keys(treeNodes).forEach(function (name) {
+      treeNodes[name].classList.toggle("is-seen", visited[name] === true);
+      treeNodes[name].classList.toggle("is-current", name === currentNode);
+    });
+  }
+
+  /* The bridge passage prints the current passage name into a hidden span. */
+  /* Keep each loading header on one line: shrink it just enough to fit
+     its box. Runs again when fonts finish loading or the window resizes. */
+  function fitTitles() {
+    Array.prototype.forEach.call(document.querySelectorAll(".info-title"), function (h) {
+      h.style.fontSize = "";
+      var tries = 0;
+      while (tries !== 6) {
+        var over = h.scrollWidth - h.clientWidth;
+        if (Math.min(over, 2) !== 2) { break; }
+        var size = parseFloat(getComputedStyle(h).fontSize);
+        h.style.fontSize = Math.max(14, Math.floor(size * h.clientWidth / h.scrollWidth)) + "px";
+        tries = tries + 1;
+      }
+    });
+  }
+  window.fitTitles = fitTitles;
+
+  function syncPassage() {
+    fitTitles();
+    var hidden = document.querySelectorAll(".jump-bridge tw-link");
+    Array.prototype.forEach.call(hidden, function (l) { l.setAttribute("tabindex", "-1"); });
+    var here = document.querySelector(".here");
+    if (!here) { return; }
+    var name = (here.textContent || "").trim();
+    if (ALIAS[name]) { name = ALIAS[name]; }
+    if (!treeNodes[name]) { return; }
+    currentNode = name;
+    visited[name] = true;
+    refreshTree();
+  }
+
+  function scheduleSync() {
+    if (syncTimer) { clearTimeout(syncTimer); }
+    syncTimer = setTimeout(syncPassage, 60);
+  }
+
+  /* Jump by clicking the hidden Harlowe link for that passage. */
+  function jumpTo(name) {
+    setMenu(false);
+    if (name === currentNode) { return; }
+    var links = document.querySelectorAll(".jump-bridge tw-link");
+    var i;
+    for (i = 0; i !== links.length; i = i + 1) {
+      if (links[i].textContent === name) {
+        track("menu_jump", { to: name });
+        links[i].click();
+        return;
+      }
+    }
+    console.warn("[tour] no jump link for", name);
+  }
+
+  function nodeButton(item) {
+    var b = el("button", "tm-node");
+    b.type = "button";
+    b.appendChild(el("span", "tm-dot"));
+    b.appendChild(el("span", "tm-node-label", item.label));
+    b.addEventListener("click", function () { jumpTo(item.name); });
+    treeNodes[item.name] = b;
+    return b;
+  }
+
+  function buildSocials(panel) {
+    panel.appendChild(el("div", "eyebrow", "Follow us"));
+    CONFIG.socials.forEach(function (s) {
+      var a = el("a", "tm-link", s.label);
+      a.href = s.url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.appendChild(el("span", "tm-arrow", "\u2197"));
+      panel.appendChild(a);
+    });
+  }
+
+  function buildTree(panel) {
+    panel.appendChild(el("div", "eyebrow", "Timeline tree"));
+    var tree = el("div", "tm-tree");
+    TREE.top.forEach(function (item, i) {
+      if (i !== 0) { tree.appendChild(el("span", "tm-stem")); }
+      tree.appendChild(nodeButton(item));
+    });
+    tree.appendChild(el("span", "tm-stem"));
+    var branches = el("div", "tm-branches");
+    TREE.branches.forEach(function (br) {
+      var col = el("div", "tm-branch");
+      col.appendChild(el("div", "tm-branch-title", br.title));
+      var list = el("div", "tm-list");
+      br.items.forEach(function (item) { list.appendChild(nodeButton(item)); });
+      col.appendChild(list);
+      branches.appendChild(col);
+    });
+    tree.appendChild(branches);
+    TREE.bottom.forEach(function (item) {
+      tree.appendChild(el("span", "tm-stem"));
+      tree.appendChild(nodeButton(item));
+    });
+    panel.appendChild(tree);
+  }
+
+  function buildMenu() {
+    if (menuEl) { return; }
+
+    if (CONFIG.music) {
+      bgm = new Audio(CONFIG.music);
+      bgm.loop = true;
+      bgm.volume = 0;
+    }
+
+    menuEl = el("div", "tm");
+    menuEl.id = "tourMenu";
+
+    burger = el("button", "tm-burger");
+    burger.type = "button";
+    burger.setAttribute("aria-label", "Menu");
+    burger.setAttribute("aria-expanded", "false");
+    burger.appendChild(el("span", "tm-line"));
+    burger.appendChild(el("span", "tm-line"));
+    burger.appendChild(el("span", "tm-line"));
+    burger.addEventListener("click", function () { setMenu(!menuIsOpen()); });
+
+    var bar = el("div", "tm-bar");
+
+    tabs.socials = el("button", "tm-tab", "Socials");
+    tabs.tree = el("button", "tm-tab", "Timeline tree");
+    musicBtn = el("button", "tm-tab tm-music", "Music on");
+    tabs.socials.type = "button";
+    tabs.tree.type = "button";
+    musicBtn.type = "button";
+    tabs.socials.setAttribute("aria-expanded", "false");
+    tabs.tree.setAttribute("aria-expanded", "false");
+
+    tabs.socials.addEventListener("click", function () {
+      showPanel(panels.socials.classList.contains("is-open") ? null : "socials");
+    });
+    tabs.tree.addEventListener("click", function () {
+      showPanel(panels.tree.classList.contains("is-open") ? null : "tree");
+    });
+    musicBtn.addEventListener("click", function () {
+      soundOn = !soundOn;
+      applySound();
+      track("music_toggle", { on: soundOn });
+    });
+
+    bar.appendChild(tabs.socials);
+    bar.appendChild(tabs.tree);
+    bar.appendChild(musicBtn);
+
+    panels.socials = el("div", "tm-panel");
+    panels.tree = el("div", "tm-panel tm-panel--tree");
+    buildSocials(panels.socials);
+    buildTree(panels.tree);
+
+    menuEl.appendChild(bar);
+    menuEl.appendChild(panels.socials);
+    menuEl.appendChild(panels.tree);
+    menuEl.appendChild(burger);
+    document.body.appendChild(menuEl);
+
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") { if (menuIsOpen()) { setMenu(false); } }
+    });
+    document.addEventListener("click", function (e) {
+      if (menuIsOpen()) {
+        if (!menuEl.contains(e.target)) { setMenu(false); }
+      }
+    });
+
+    applySound();
+  }
+
+  /* ---------- late reveal ----------
+     Anything with class reveal-late fades in N seconds after the clip
+     actually starts playing. N is data-reveal on the scene cue. */
+  var revealTimer = null;
+
+  /* Harlowe wraps a new scene in a temporary box for about 0.8 seconds and
+     then moves the content out of it. Moving restarts any fade that is
+     running, which shows as a flicker. So the reveal waits until that
+     wrapper is gone. */
+  function showLate(tries) {
+    var left = (tries === undefined) ? 40 : tries;
+    if (left !== 0) {
+      if (document.querySelector("tw-transition-container")) {
+        setTimeout(function () { showLate(left - 1); }, 80);
+        return;
+      }
+    }
+    Array.prototype.forEach.call(document.querySelectorAll(".reveal-late, .late-anim"), function (n) {
+      n.classList.add("is-in");
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".hide-late"), function (n) {
+      n.classList.add("is-out");
+    });
+  }
+
+  function armReveal(key, seconds) {
+    if (revealTimer) { clearTimeout(revealTimer); }
+    var fired = false;
+    var go = function () {
+      if (fired) { return; }
+      fired = true;
+      if (key === currentScene) { showLate(); }
+    };
+    video.addEventListener("playing", function () {
+      revealTimer = setTimeout(go, seconds * 1000);
+    }, { once: true });
+    video.addEventListener("error", go, { once: true });
+    /* safety net if the clip never reports that it is playing */
+    setTimeout(go, seconds * 1000 + 20000);
+  }
+
+  /* ---------- menu book: turn pages ---------- */
+  /* Phone portrait zoom shows one page at a time. */
+  function phoneZoom() {
+    return window.matchMedia("(max-width: 700px) and (orientation: portrait)").matches;
+  }
+
+  function stepPage(book, dir) {
+    var spread = book.getAttribute("data-spread") === "1" ? 1 : 0;
+    var pos = spread * 2 + (book.getAttribute("data-focus") === "r" ? 1 : 0);
+    var want = (dir === "next") ? pos + 1 : pos - 1;
+    if (want === -1) { return; }
+    if (want === 4) { return; }
+    book.setAttribute("data-spread", (want === 2 || want === 3) ? "1" : "0");
+    book.setAttribute("data-focus", (want === 1 || want === 3) ? "r" : "l");
+    book.setAttribute("data-pos", String(want));
+    track("menu_page", { page: want + 1 });
+  }
+
+  function turnBook(dir) {
+    var book = document.querySelector(".menu-book");
+    if (!book) { return; }
+    if (book.getAttribute("data-zoom") === "1") {
+      if (phoneZoom()) { stepPage(book, dir); return; }
+    }
+    var now = book.getAttribute("data-spread") === "1" ? 1 : 0;
+    var want = dir === "next" ? 1 : 0;
+    if (want === now) { return; }
+    book.setAttribute("data-spread", String(want));
+    track("menu_page", { spread: want });
+  }
+
+  function zoomBook(on, from) {
+    var book = document.querySelector(".menu-book");
+    if (!book) { return; }
+    var now = book.getAttribute("data-zoom") === "1";
+    var want = (on === undefined) ? !now : on;
+    if (want === now) { return; }
+    book.setAttribute("data-zoom", want ? "1" : "0");
+    if (want) {
+      var pg = null;
+      if (from) { if (from.closest) { pg = from.closest(".pg"); } }
+      var side = "l";
+      if (pg) { if (pg.classList.contains("pg-r")) { side = "r"; } }
+      var spread = book.getAttribute("data-spread") === "1" ? 1 : 0;
+      book.setAttribute("data-focus", side);
+      book.setAttribute("data-pos", String(spread * 2 + (side === "r" ? 1 : 0)));
+    }
+    track("menu_zoom", { on: want });
+  }
+
+  document.addEventListener("click", function (e) {
+    var t = e.target;
+    if (!t) { return; }
+    if (!t.closest) { return; }
+    var edge = t.closest("[data-turn]");
+    if (edge) { turnBook(edge.getAttribute("data-turn")); return; }
+    if (t.closest(".menu-veil")) { zoomBook(false); return; }
+    if (t.closest(".menu-book")) { zoomBook(undefined, t); }
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { zoomBook(false); }
+    var t = e.target;
+    if (t) {
+      if (t.getAttribute) {
+        var dir = t.getAttribute("data-turn");
+        if (dir) {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            turnBook(dir);
+            return;
+          }
+        }
+      }
+    }
+    if (document.querySelector(".menu-book.is-in")) {
+      if (e.key === "ArrowRight") { turnBook("next"); }
+      if (e.key === "ArrowLeft") { turnBook("prev"); }
+    }
+    var side = null;
+    if (e.key === "ArrowLeft") { side = document.querySelector(".side-zone--back tw-link"); }
+    if (e.key === "ArrowRight") { side = document.querySelector(".side-zone--next tw-link"); }
+    if (side) { side.click(); }
+  });
+
+  /* A passage declares its clip with plain HTML:
+       div class="scene-cue" data-scene="balcony" data-loop="0" data-warm="floor2,gfl1"
+     data-warm is optional: a comma list of scenes to prefetch. */
+  function readCue(node) {
+    if (!node) { return; }
+    if (!node.getAttribute) { return; }
+    var key = node.getAttribute("data-scene");
+    if (!key) { return; }
+    /* Harlowe can hand the same cue node back to the observer more
+       than once. Handle each node one time only. */
+    if (node.getAttribute("data-cued") === "1") { return; }
+    node.setAttribute("data-cued", "1");
+    var lf = node.getAttribute("data-loop-from");
+    playScene(key, {
+      loop: node.getAttribute("data-loop") === "1",
+      loopFrom: lf ? parseFloat(lf) : undefined
+    });
+    var reveal = node.getAttribute("data-reveal");
+    if (reveal) { armReveal(key, parseFloat(reveal)); }
+    pendingThen = null;
+    var then = node.getAttribute("data-then");
+    if (then) {
+      pendingThen = {
+        from: key,
+        key: then,
+        loop: node.getAttribute("data-then-loop") === "1",
+        reveal: parseFloat(node.getAttribute("data-then-reveal") || "0")
+      };
+    }
+    var list = node.getAttribute("data-warm");
+    if (list) {
+      warm(list.split(",").map(function (s) { return s.trim(); }));
+    }
+  }
+
+  function scan(root) {
+    if (!root) { return; }
+    if (!root.querySelectorAll) { return; }
+    if (root.classList) {
+      if (root.classList.contains("scene-cue")) { readCue(root); }
+    }
+    Array.prototype.forEach.call(root.querySelectorAll(".scene-cue"), readCue);
+  }
+
+  function boot() {
+    buildVideo();
+    buildMenu();
+    window.addEventListener("resize", fitTitles);
+    if (document.fonts) {
+      document.fonts.addEventListener("loadingdone", fitTitles);
+      if (document.fonts.ready) { document.fonts.ready.then(fitTitles); }
+    }
+    scan(document.body);
+    new MutationObserver(function (muts) {
+      Array.prototype.forEach.call(muts, function (mut) {
+        Array.prototype.forEach.call(mut.addedNodes, scan);
+      });
+      scheduleSync();
+    }).observe(document.body, { childList: true, subtree: true });
+    scheduleSync();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
+
+  /* Proof the pane ran. No console line means the pane is empty
+     or was corrupted on save. */
+  window.TOUR_LOADED = true;
+  console.log("%c[tour] engine loaded", "color:#8EA2FF");
+})();
+
+:: Story Stylesheet [stylesheet]
+/* ============================================================
+   CAFE TOUR - stylesheet
+   Paste into the Twine story Stylesheet pane (Story, Details)
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@300;400;500&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+:root {
+  --ink:    #0B1230;   /* deep navy, from the table reflections */
+  --bone:   #F1EEE8;   /* cream white, from the type and cup */
+  --accent: #8EA2FF;   /* light cobalt, readable on dark */
+  --cobalt: #2342C6;   /* the cup sleeve */
+  --navy:   #263E78;   /* mid navy, from the table */
+  --sand:   #B3A999;   /* warm beige, from the wall and sofa */
+  --veil:   rgba(0, 0, 0, 0.55);   /* black shade at the bottom of every scene */
+  --line:   rgba(241, 238, 232, 0.18);
+}
+
+/* ---------- page shell ---------- */
+
+html, body { height: 100%; }
+
+body {
+  overflow: hidden;
+  background: var(--ink);
+  margin: 0;
+}
+
+tw-story {
+  /* Harlowe paints this element black by default, which would sit
+     over the video. */
+  background-color: transparent !important;
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  max-width: none;
+  padding: 0;
+  margin: 0;
+  font-family: "Inter Tight", system-ui, sans-serif;
+  font-weight: 300;
+  color: var(--bone);
+  font-size: 1rem;
+}
+
+tw-passage { display: block; height: 100%; }
+
+/* the persistent video lives behind everything */
+#tourVideo {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: cover;
+  background: var(--ink);
+  z-index: -2;
+}
+
+/* Harlowe's undo/redo arrows float over the footage */
+tw-sidebar { display: none !important; }
+
+/* Harlowe's default link chrome, removed */
+tw-link, .enchantment-link, tw-link:hover, .visited {
+  color: inherit;
+  font-weight: inherit;
+  text-decoration: none;
+  border: 0;
+}
+
+/* ---------- vertical layout ---------- */
+
+.stage {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-rows: 1fr auto 14vh;
+  align-items: center;
+  padding: 0 6vw;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+.stage::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: linear-gradient(to bottom, transparent 45%, var(--veil) 100%);
+  z-index: -1;
+  pointer-events: none;
+}
+
+.caption { align-self: end; max-width: 34rem; margin: 0 auto 4vh; }
+
+.eyebrow {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 0.9rem;
+}
+
+.room-name {
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: clamp(2.4rem, 6vw, 4.2rem);
+  line-height: 1.05;
+  margin: 0 0 0.6rem;
+}
+
+.room-note {
+  font-size: 0.95rem;
+  line-height: 1.6;
+  opacity: 0.82;
+  margin: 0;
+}
+
+/* progress ticks: one per scene in a stretch */
+.steps {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-bottom: 1.1rem;
+}
+
+.steps i {
+  display: block;
+  width: 1.8rem;
+  height: 2px;
+  background: rgba(241, 238, 232, 0.28);
+}
+
+.steps i.on { background: var(--accent); }
+
+/* ---------- buttons ---------- */
+
+.cta { align-self: center; }
+
+.cta-link {
+  display: inline-block;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.78rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  padding: 1.1rem 2.4rem;
+  border: 1px solid rgba(241, 238, 232, 0.35);
+  cursor: pointer;
+  transition: border-color 0.4s ease, letter-spacing 0.4s ease, background 0.4s ease;
+}
+
+.cta-link:hover,
+.cta-link:focus-within {
+  border-color: var(--accent);
+  letter-spacing: 0.28em;
+  background: rgba(142, 162, 255, 0.08);
+}
+
+/* smaller, for Skip */
+.cta-link--quiet {
+  font-size: 0.68rem;
+  padding: 0.75rem 1.6rem;
+  opacity: 0.78;
+}
+
+/* ---------- the fork: left and right halves ---------- */
+
+.stage--fork { grid-template-rows: auto 1fr 34vh; }
+
+/* question block sits at the top, over the windows */
+.stage--fork .caption { align-self: start; margin: 12vh auto 0; }
+
+.stage--fork .eyebrow,
+.stage--fork .room-name { text-shadow: 0 1px 18px rgba(0, 0, 0, 0.45); }
+
+/* darken the top for the text and the bottom for the two choices */
+.stage--fork::before {
+  background: linear-gradient(to bottom,
+    rgba(0, 0, 0, 0.5) 0%, transparent 40%,
+    transparent 60%, var(--veil) 100%);
+}
+
+.fork {
+  align-self: stretch;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin: 0 -6vw;
+  border-top: 1px solid var(--line);
+}
+
+.fork-side {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0 6vw;
+  transition: background 0.4s ease;
+}
+
+.fork-side + .fork-side { border-left: 1px solid var(--line); }
+
+.fork-side:hover,
+.fork-side:focus-within { background: rgba(142, 162, 255, 0.1); }
+
+/* the whole half is the click target */
+.fork-side tw-link::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  cursor: pointer;
+}
+
+.fork-dir {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.fork-title {
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: clamp(1.8rem, 5vw, 3rem);
+  line-height: 1.05;
+}
+
+.fork-hint {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  opacity: 0.75;
+  max-width: 16rem;
+}
+
+/* ---------- loading ---------- */
+
+.loading-mark {
+  position: fixed;
+  left: 0; right: 0; bottom: 12vh;
+  text-align: center;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--bone);
+  opacity: 0.6;
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes breathe { 0%,100% { opacity: 0.25; } 50% { opacity: 0.75; } }
+
+/* ---------- utility ---------- */
+
+.auto-advance { position: absolute; left: -9999px; }
+
+tw-link:focus-visible { outline: 1px solid var(--accent); outline-offset: 4px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+/* ---------- menu: hamburger, bar, panels ---------- */
+
+.tm {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  pointer-events: none;
+  font-family: "Inter Tight", system-ui, sans-serif;
+  color: var(--bone);
+}
+
+.tm *, .tm *::before, .tm *::after { box-sizing: border-box; }
+
+.tm button { font-family: inherit; color: inherit; }
+
+.tm-burger {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  background: rgba(11, 18, 48, 0.5);
+  border: 1px solid rgba(241, 238, 232, 0.35);
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  transition: border-color 0.4s ease, background 0.4s ease;
+}
+
+.tm-burger:hover,
+.tm-burger:focus-visible { border-color: var(--accent); background: rgba(142, 162, 255, 0.12); }
+
+.tm-line {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  height: 2px;
+  background: var(--bone);
+  transition: transform 0.4s ease, opacity 0.25s ease;
+}
+
+.tm-line:nth-child(1) { top: 15px; }
+.tm-line:nth-child(2) { top: 22px; }
+.tm-line:nth-child(3) { top: 29px; }
+
+.tm.is-open .tm-line:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+.tm.is-open .tm-line:nth-child(2) { opacity: 0; }
+.tm.is-open .tm-line:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
+/* the bar slides out to the left of the burger */
+.tm-bar {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  right: 74px;
+  height: 46px;
+  display: flex;
+  background: rgba(11, 18, 48, 0.72);
+  border: 1px solid rgba(241, 238, 232, 0.25);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  clip-path: inset(0 0 0 100%);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: auto;
+  transition: clip-path 0.5s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.3s ease, visibility 0s linear 0.5s;
+}
+
+.tm.is-open .tm-bar {
+  clip-path: inset(0 0 0 0);
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+.tm-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 0.6rem;
+  background: none;
+  border: 0;
+  border-left: 1px solid var(--line);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 0.3s ease, background 0.3s ease, letter-spacing 0.4s ease;
+}
+
+.tm-tab:first-child { border-left: 0; }
+
+.tm-tab:hover,
+.tm-tab:focus-visible,
+.tm-tab.is-on { color: var(--accent); background: rgba(142, 162, 255, 0.1); }
+
+.tm-music.is-off { opacity: 0.6; }
+
+.tm-panel {
+  position: absolute;
+  top: 68px;
+  right: 14px;
+  width: min(23rem, calc(100vw - 28px));
+  max-height: calc(100vh - 90px);
+  overflow-y: auto;
+  padding: 1.2rem 1.3rem 1.3rem;
+  background: rgba(11, 18, 48, 0.82);
+  border: 1px solid rgba(241, 238, 232, 0.25);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-8px);
+  pointer-events: auto;
+  transition: opacity 0.3s ease, transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1), visibility 0s linear 0.4s;
+}
+
+.tm-panel.is-open {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition-delay: 0s;
+}
+
+.tm-panel .eyebrow { margin-bottom: 0.7rem; }
+
+/* socials */
+.tm-link {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 0.8rem 0;
+  border-top: 1px solid var(--line);
+  color: var(--bone);
+  text-decoration: none;
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: 1.4rem;
+  transition: color 0.3s ease, padding 0.3s ease;
+}
+
+.tm-link:hover,
+.tm-link:focus-visible { color: var(--accent); padding-left: 0.4rem; }
+
+.tm-arrow { font-family: "IBM Plex Mono", monospace; font-size: 0.8rem; opacity: 0.7; }
+
+/* timeline tree */
+.tm-tree { display: flex; flex-direction: column; }
+
+.tm-stem { display: block; width: 1px; height: 0.7rem; margin-left: 4px; background: var(--line); }
+
+.tm-node {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.38rem 0;
+  background: none;
+  border: 0;
+  text-align: left;
+  font-size: 0.92rem;
+  font-weight: 300;
+  opacity: 0.6;
+  cursor: pointer;
+  transition: opacity 0.25s ease, color 0.25s ease;
+}
+
+.tm-node:hover,
+.tm-node:focus-visible { opacity: 1; }
+
+.tm-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--bone);
+  border-radius: 50%;
+}
+
+.tm-node.is-seen { opacity: 0.85; }
+.tm-node.is-seen .tm-dot { background: rgba(241, 238, 232, 0.7); }
+
+.tm-node.is-current { opacity: 1; color: var(--accent); }
+.tm-node.is-current .tm-dot { background: var(--accent); border-color: var(--accent); }
+
+.tm-branches { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; }
+
+.tm-branch-title {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0.2rem 0 0.2rem 0.1rem;
+}
+
+.tm-list { margin-left: 4px; border-left: 1px solid var(--line); }
+.tm-list .tm-dot { margin-left: -5px; background: var(--ink); }
+.tm-list .tm-node.is-seen .tm-dot { background: rgba(241, 238, 232, 0.7); }
+.tm-list .tm-node.is-current .tm-dot { background: var(--accent); }
+
+/* the bridge passage hides its jump links here */
+.jump-bridge { position: absolute; left: -9999px; top: 0; width: 1px; height: 1px; overflow: hidden; }
+
+@media (max-width: 520px) {
+  .tm-tab { font-size: 0.58rem; letter-spacing: 0.1em; padding: 0 0.25rem; }
+  .tm-node { font-size: 0.85rem; }
+  .tm-branches { gap: 0.8rem; }
+}
+/* ---------- menu book: late reveal ---------- */
+
+.reveal-late {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.9s ease, visibility 0s linear 0.9s;
+}
+
+.reveal-late.is-in {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+.menu-instruction {
+  position: absolute;
+  top: 3vh;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: min(34rem, 80vw);
+  text-align: center;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.58rem;
+  line-height: 1.6;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--bone);
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.85), 0 0 3px rgba(0, 0, 0, 0.6);
+}
+
+/* ---------- menu book: the book ---------- */
+
+.menu-book {
+  position: absolute;
+  top: 8.5vh;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(90vw, 80vh);
+  aspect-ratio: 3 / 2;
+}
+
+.mb-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  perspective: 2400px;
+}
+
+.pg {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  width: 50%;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  text-align: center;
+  background: #EFECE6;
+  color: #18204A;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.4);
+}
+
+.pg-l { left: 0; }
+.pg-r { left: 50%; }
+.face .pg { left: 0; width: 100%; }
+
+/* the real photo sits on top of the placeholder once the file exists */
+.pg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  z-index: 1;
+}
+
+.pg-1::after { background-image: url(menu/page-1.jpg); }
+.pg-2::after { background-image: url(menu/page-2.jpg); }
+.pg-3::after { background-image: url(menu/page-3.jpg); }
+.pg-4::after { background-image: url(menu/page-4.jpg); }
+
+/* soft shading toward the spine */
+.pg::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8%;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.pg-l::before { right: 0; background: linear-gradient(to left, rgba(0, 0, 0, 0.14), transparent); }
+.pg-r::before { left: 0; background: linear-gradient(to right, rgba(0, 0, 0, 0.14), transparent); }
+
+.pg-sec {
+  font-family: "Instrument Serif", Georgia, serif;
+  font-size: clamp(1.4rem, 3.2vw, 2.6rem);
+  line-height: 1.05;
+}
+
+.pg-num,
+.pg-file {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+.pg-file { text-transform: none; letter-spacing: 0.06em; }
+
+/* the page that turns: front is page 2, back is page 3 */
+.leaf {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  left: 50%;
+  width: 50%;
+  height: 100%;
+  transform-origin: left center;
+  transform-style: preserve-3d;
+  transition: transform 0.9s cubic-bezier(0.45, 0.05, 0.25, 1);
+}
+
+.menu-book[data-spread="1"] .leaf { transform: rotateY(-180deg); }
+
+.face {
+  position: absolute;
+  inset: 0;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
+.face-back { transform: rotateY(180deg); }
+
+/* click zones on the outer edge of each page */
+.mb-edge {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: max(13%, 44px);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  color: var(--accent);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 2rem;
+  transition: background 0.3s ease;
+}
+
+.mb-edge--prev { left: 0; justify-content: flex-start; padding-left: 0.6rem; }
+.mb-edge--next { right: 0; justify-content: flex-end; padding-right: 0.6rem; }
+
+.mb-edge--prev::after { content: "\2039"; }
+.mb-edge--next::after { content: "\203A"; }
+
+.mb-edge--prev:hover,
+.mb-edge--prev:focus-visible { background: linear-gradient(to right, rgba(142, 162, 255, 0.3), transparent); outline: none; }
+
+.mb-edge--next:hover,
+.mb-edge--next:focus-visible { background: linear-gradient(to left, rgba(142, 162, 255, 0.3), transparent); outline: none; }
+
+.menu-book[data-spread="0"] .mb-edge--prev { display: none; }
+.menu-book[data-spread="1"] .mb-edge--next { display: none; }
+/* ---------- menu book: zoom ---------- */
+
+.menu-book {
+  z-index: 3;
+  transition: opacity 0.9s ease, visibility 0s linear 0.9s,
+    width 0.6s cubic-bezier(0.2, 0.8, 0.2, 1),
+    top 0.6s cubic-bezier(0.2, 0.8, 0.2, 1),
+    transform 0.6s cubic-bezier(0.2, 0.8, 0.2, 1),
+    left 0.6s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.menu-book[data-zoom="1"] {
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(94vw, 132vh);
+}
+
+.menu-book .pg { cursor: zoom-in; }
+.menu-book[data-zoom="1"] .pg { cursor: zoom-out; }
+
+/* dark, blurred backdrop while a page is zoomed */
+.menu-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  background: rgba(0, 0, 0, 0.62);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  cursor: zoom-out;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.5s ease, visibility 0s linear 0.5s;
+}
+
+.menu-book[data-zoom="1"] ~ .menu-veil {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+/* ---------- look around: invisible left and right click zones ---------- */
+
+.side-zone {
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  width: 24vw;
+  z-index: 1;
+}
+
+.side-zone--back { left: 0; }
+.side-zone--next { right: 0; }
+
+/* the link fills the zone but shows nothing (Harlowe wraps it in a relative box) */
+.side-zone tw-expression,
+.side-zone tw-hook { position: static; }
+
+.side-zone tw-link {
+  position: absolute;
+  inset: 0;
+  display: block;
+  font-size: 0;
+  line-height: 0;
+  color: transparent;
+  text-decoration: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* keyboard users still see where focus is */
+.side-zone--back tw-link:focus-visible { outline: none; background: linear-gradient(to right, rgba(142, 162, 255, 0.18), transparent); }
+.side-zone--next tw-link:focus-visible { outline: none; background: linear-gradient(to left, rgba(142, 162, 255, 0.18), transparent); }
+
+/* nearly invisible instruction */
+.side-hint {
+  position: fixed;
+  top: 3vh;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  width: max-content;
+  max-width: min(34rem, 70vw);
+  text-align: center;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.58rem;
+  line-height: 1.6;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--bone);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+  opacity: 0;
+  animation: sideHintIn 1.4s ease 0.8s forwards;
+}
+
+@keyframes sideHintIn { from { opacity: 0; } to { opacity: 0.38; } }
+
+/* ---------- smooth scene changes, and one scene with two clips ---------- */
+
+.tour-hold {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: cover;
+  z-index: -1;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.35s ease;
+}
+
+.tour-hold.is-on { opacity: 1; transition: none; }
+
+.title-swap { display: grid; justify-items: center; }
+.title-swap .room-name { grid-area: 1 / 1; }
+
+.hide-late { transition: opacity 0.9s ease, visibility 0s linear 0.9s; }
+.hide-late.is-out { opacity: 0; visibility: hidden; }
+/* ---------- mobile ---------- */
+
+html { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+
+/* use the visible height on phones where the browser toolbar comes and goes */
+@supports (height: 100dvh) {
+  #tourVideo, .tour-hold { height: 100dvh; }
+  .stage { grid-template-rows: 1fr auto 14dvh; }
+  .caption { margin: 0 auto 4dvh; }
+  .stage--fork { grid-template-rows: auto 1fr 34dvh; }
+  .stage--fork .caption { margin: 12dvh auto 0; }
+  .loading-mark { bottom: 12dvh; }
+  .tm-panel { max-height: calc(100dvh - 90px); }
+  .menu-instruction, .side-hint { top: 3dvh; }
+  .menu-book { top: 8.5dvh; width: min(90vw, 80dvh); }
+  .menu-book[data-zoom="1"] { width: min(94vw, 132dvh); }
+}
+
+/* the whole button is tappable, not just its label */
+.cta-link { position: relative; }
+.cta-link tw-expression,
+.cta-link tw-hook,
+.cta-link tw-link { position: static; }
+.cta-link tw-link::after { content: ""; position: absolute; inset: 0; }
+
+/* touch screens: bigger targets */
+@media (pointer: coarse) {
+  .cta-link--quiet { padding: 0.95rem 1.6rem; }
+  .tm-node { padding: 0.85rem 0; }
+  .tm-link { padding: 1rem 0; }
+}
+
+/* phone, portrait */
+@media (max-width: 520px) {
+  .tm-tab { font-size: 0.62rem; }
+  .menu-instruction,
+  .side-hint { max-width: calc(100vw - 132px); font-size: 0.64rem; letter-spacing: 0.1em; }
+  .menu-book { top: 12vh; top: 12dvh; }
+}
+
+/* phone, landscape: give the book the room and hide the caption under it */
+@media (max-height: 520px) and (orientation: landscape) {
+  .menu-book { top: 11vh; top: 11dvh; width: min(90vw, 104vh); width: min(90vw, 104dvh); }
+  .menu-book.is-in ~ .caption { opacity: 0; transition: opacity 0.4s ease; }
+}
+
+/* phone portrait zoom: one page fills the screen, side taps change page */
+.mb-nav {
+  display: none;
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  width: 22vw;
+  z-index: 4;
+  align-items: center;
+  cursor: pointer;
+  color: var(--accent);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 2.2rem;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.8);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mb-nav--prev { left: 0; justify-content: flex-start; padding-left: 0.5rem; }
+.mb-nav--next { right: 0; justify-content: flex-end; padding-right: 0.5rem; }
+.mb-nav--prev::after { content: "\2039"; }
+.mb-nav--next::after { content: "\203A"; }
+
+@media (max-width: 700px) and (orientation: portrait) {
+  .menu-book[data-zoom="1"] { left: 97vw; width: 188vw; }
+  .menu-book[data-zoom="1"][data-focus="r"] { left: 3vw; }
+  .menu-book[data-zoom="1"] .mb-edge { display: none; }
+  .menu-book[data-zoom="1"] ~ .mb-nav { display: flex; }
+  .menu-book[data-zoom="1"][data-pos="0"] ~ .mb-nav--prev::after,
+  .menu-book[data-zoom="1"][data-pos="3"] ~ .mb-nav--next::after { opacity: 0; }
+}
+/* ---------- brand fonts: Canela Bold and Canela Text ----------
+   Put the font files in a fonts folder next to index.html:
+   fonts/Canela-Bold.woff2 and fonts/CanelaText-Regular.woff2
+   (.woff versions also work). Until they are there, Georgia is used. */
+
+@font-face {
+  font-family: "Canela";
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+  src: local("Canela Bold"), local("Canela-Bold"),
+       url("fonts/Canela-Bold.woff2") format("woff2"),
+       url("fonts/Canela-Bold.woff") format("woff");
+}
+
+@font-face {
+  font-family: "Canela Text";
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  src: local("Canela Text Regular"), local("CanelaText-Regular"), local("Canela Text"),
+       url("fonts/CanelaText-Regular.woff2") format("woff2"),
+       url("fonts/CanelaText-Regular.woff") format("woff");
+}
+
+:root {
+  --font-display: "Canela", Georgia, "Times New Roman", serif;
+  --font-text: "Canela Text", Georgia, "Times New Roman", serif;
+}
+
+tw-story,
+.tm { font-family: var(--font-text); }
+
+/* names and titles: Canela Bold */
+.room-name,
+.fork-title,
+.tm-link,
+.pg-sec { font-family: var(--font-display); font-weight: 700; }
+
+/* keep a long name evenly split over two lines */
+.room-name { text-wrap: balance; }
+
+/* small lines, notes, buttons and menu text: Canela Text */
+.eyebrow,
+.room-note,
+.cta-link,
+.fork-dir,
+.loading-mark,
+.tm-tab,
+.tm-branch-title,
+.menu-instruction,
+.side-hint,
+.pg-num { font-family: var(--font-text); font-weight: 400; }
+
+/* longer notes under a scene title */
+.room-note {
+  max-width: 34rem;
+  margin: 0.9rem auto 0;
+  font-size: 0.98rem;
+  line-height: 1.55;
+}
+
+@media (max-width: 520px) {
+  .room-note { font-size: 0.86rem; line-height: 1.5; max-width: 92%; }
+}
+
+/* click wording on a mouse, tap wording on a touch screen */
+.t-tap { display: none; }
+
+@media (pointer: coarse) {
+  .t-click { display: none; }
+  .t-tap { display: inline; }
+}
+
+/* ---------- title sizes (a bit smaller) ---------- */
+
+.room-name { font-size: clamp(2rem, 5.1vw, 3.6rem); }
+.fork-title { font-size: clamp(1.5rem, 4.25vw, 2.55rem); }
+.pg-sec { font-size: clamp(1.2rem, 2.7vw, 2.2rem); }
+.tm-link { font-size: 1.2rem; }
+
+/* loading text: a black backing that is barely visible */
+.loading-mark {
+  width: max-content;
+  margin: 0 auto;
+  padding: 0.7rem 1.3rem;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+/* ---------- palette from the Concordia's brand photo ---------- */
+
+.cta-link:hover,
+.cta-link:focus-within {
+  border-color: var(--accent);
+  background: rgba(35, 66, 198, 0.5);
+}
+
+.tm-burger:hover,
+.tm-burger:focus-visible { background: rgba(35, 66, 198, 0.5); }
+
+.tm-tab:hover,
+.tm-tab:focus-visible,
+.tm-tab.is-on { background: rgba(35, 66, 198, 0.45); }
+
+/* quiet text uses the warm beige of the wall and sofa */
+.room-note,
+.fork-side p,
+.menu-instruction,
+.side-hint { color: var(--sand); }
+
+
+/* ---------- loading screens: centered text, big header, drop shadow ---------- */
+
+.loading-info {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6vw 9vh;
+  padding-bottom: 9dvh;
+  text-align: center;
+  color: var(--bone);
+  pointer-events: none;
+  /* no box behind the text: a black drop shadow keeps it readable */
+  text-shadow: 3px 4px 10px rgba(0, 0, 0, 0.55), 0 0 32px rgba(0, 0, 0, 0.4);
+  transform: translateY(8px);
+  transition: opacity 0.9s ease, transform 0.9s ease, visibility 0s linear 0.9s;
+}
+
+.loading-info.is-in { transform: none; }
+
+.info-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(2.8rem, 8.5vw, 7.5rem);
+  line-height: 1.02;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.info-sub {
+  margin: 0.35rem 0 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(1.3rem, 3vw, 2.4rem);
+  line-height: 1.1;
+}
+
+.info-body {
+  margin: clamp(1.6rem, 5vh, 3.2rem) 0 0;
+  max-width: 44rem;
+  font-family: var(--font-text);
+  font-size: clamp(1rem, 1.55vw, 1.3rem);
+  line-height: 1.5;
+  color: var(--bone);
+  text-shadow: 1px 2px 4px rgba(0, 0, 0, 0.7), 0 0 14px rgba(0, 0, 0, 0.55), 0 0 36px rgba(0, 0, 0, 0.35);
+}
+
+/* wide screens: each loading text sits inside its marked area, centered there.
+   Phones and small windows keep the full-screen centered layout above. */
+@media (min-width: 901px) {
+  .loading-info--left,
+  .loading-info--right {
+    inset: auto;
+    padding: 0;
+  }
+
+  .loading-info--left {
+    left: 6.6vw;
+    width: 28vw;
+    top: 19vh;
+    top: 19dvh;
+    height: 63vh;
+    height: 63dvh;
+  }
+
+  .loading-info--right {
+    left: 60vw;
+    width: 29vw;
+    top: 27vh;
+    top: 27dvh;
+    height: 45vh;
+    height: 45dvh;
+  }
+
+  .loading-info--left .info-title,
+  .loading-info--right .info-title { font-size: clamp(2rem, 6vw, 6rem); }
+
+  .loading-info--left .info-sub,
+  .loading-info--right .info-sub { font-size: clamp(1.15rem, 1.9vw, 1.7rem); }
+
+  .loading-info--left .info-body,
+  .loading-info--right .info-body {
+    max-width: 100%;
+    margin-top: clamp(1.2rem, 3.5vh, 2.4rem);
+    font-size: clamp(0.95rem, 1.15vw, 1.2rem);
+  }
+}
+
+/* "One moment" breathes only once the scene has settled, so it never restarts */
+.loading-mark { animation: none; }
+.loading-mark.is-in { animation: breathe 2.4s ease-in-out infinite; }
+
+
+:: Opening Scene {"position":"100,100","size":"100,100"}
+{
+(set: $first to "")
+<div class="scene-cue" data-scene="opening" data-loop="1" data-warm="entering,loading2,loading"></div>
+
+<div class="stage">
+  <div></div>
+  <div class="caption">
+    <div class="eyebrow">Welcome to</div>
+    <h1 class="room-name">(print: $cafe)</h1>
+  </div>
+  <div class="cta">
+    <span class="cta-link">(link-goto: "Step inside", "Entering Cafe Scene")</span>
+  </div>
+</div>
+}
+
+:: Entering Cafe Scene {"position":"250,100","size":"100,100"}
+{
+<div class="scene-cue" data-scene="entering" data-loop="0" data-warm="loading2,loading,choose"></div>
+
+<span class="auto-advance">(link-goto: "continue", "Loading Tagaytay Scene")</span>
+(after: $safety)[(go-to: "Loading Tagaytay Scene")]
+}
+
+:: Loading Longanissa Scene {"position":"400,250","size":"100,100"}
+{
+<div class="scene-cue" data-scene="loading" data-loop="0" data-reveal="0.4" data-warm="choose,line,balcony"></div>
+
+<div class="loading-mark late-anim">One moment</div>
+
+<div class="loading-info loading-info--right reveal-late">
+  <h2 class="info-title">Garlic Longanissa</h2>
+  <p class="info-sub">Breakfast Meal</p>
+  <p class="info-body">Savory, garlicky Filipino pork sausage that is traditionally served with garlic fried rice and an egg for breakfast.</p>
+</div>
+
+<span class="auto-advance">(link-goto: "continue", "Choose Route")</span>
+(after: $safety)[(go-to: "Choose Route")]
+}
+
+:: Loading Tagaytay Scene {"position":"400,100","size":"100,100"}
+{
+<div class="scene-cue" data-scene="loading2" data-loop="0" data-reveal="0.4" data-warm="loading,choose,line,balcony"></div>
+
+<div class="loading-mark late-anim">One moment</div>
+
+<div class="loading-info loading-info--left reveal-late">
+  <h2 class="info-title">Concordia’s Cafe</h2>
+  <p class="info-sub">Tagaytay City</p>
+  <p class="info-body">Striking Korean-inspired blue and white minimalist interiors, high ceilings, and cozy modern setups.</p>
+</div>
+
+<span class="auto-advance">(link-goto: "continue", "Loading Longanissa Scene")</span>
+(after: $safety)[(go-to: "Loading Longanissa Scene")]
+}
+
+:: Choose Route {"position":"550,100","size":"100,100"}
+{
+<div class="scene-cue" data-scene="choose" data-loop="1" data-warm="line,menu,balcony,floor2,gfl1,gfl2,ending"></div>
+
+<div class="stage stage--fork">
+  <div class="caption">
+    <div class="eyebrow">Inside</div>
+    <h1 class="room-name">Where to first?</h1>
+  </div>
+  <div></div>
+  <div class="fork">
+    <div class="fork-side">
+      <div class="fork-dir">Left</div>
+      <div class="fork-title">(link-goto: "Order first", "Waiting In Line Scene")</div>
+      <div class="fork-hint">Join the line, then look around.</div>
+    </div>
+    <div class="fork-side">
+      <div class="fork-dir">Right</div>
+      <div class="fork-title">(link-goto: "Look around", "Balcony Area Scene")</div>
+      <div class="fork-hint">Take the walkthrough, then order.</div>
+    </div>
+  </div>
+</div>
+}
+
+:: Waiting In Line Scene {"position":"250,300","size":"100,100"}
+{
+(if: $first is "")[(set: $first to "order")]
+<div class="scene-cue" data-scene="line" data-loop="0"></div>
+
+<div class="stage">
+  <div></div>
+  <div class="caption">
+    <div class="steps"><i class="on"></i><i></i><i></i></div>
+    <div class="eyebrow">Order</div>
+    <h1 class="room-name">Waiting in line</h1>
+  </div>
+  <div></div>
+</div>
+
+<span class="auto-advance">(link-goto: "continue", "Food Menu Scene")</span>
+(after: $safety)[(go-to: "Food Menu Scene")]
+}
+
+:: Food Menu Scene {"position":"250,600","size":"100,100"}
+{
+(if: $first is "")[(set: $first to "order")]
+<div class="scene-cue" data-scene="menu" data-loop="1" data-loop-from="9" data-reveal="10.5"></div>
+
+<div class="stage">
+  <div class="menu-instruction reveal-late"><span class="t-click">Click a page edge to turn it. Click a page to zoom.</span><span class="t-tap">Tap a page edge to turn it. Tap a page to zoom.</span></div>
+
+  <div class="menu-book reveal-late" data-spread="0">
+    <div class="mb-stage">
+      <div class="pg pg-l pg-1"><div class="pg-sec">Drinks</div><div class="pg-num">Page 1</div><div class="pg-file">menu/page-1.jpg</div></div>
+      <div class="pg pg-r pg-4"><div class="pg-sec">Food</div><div class="pg-num">Page 4</div><div class="pg-file">menu/page-4.jpg</div></div>
+      <div class="leaf">
+        <div class="face face-front"><div class="pg pg-r pg-2"><div class="pg-sec">Drinks</div><div class="pg-num">Page 2</div><div class="pg-file">menu/page-2.jpg</div></div></div>
+        <div class="face face-back"><div class="pg pg-l pg-3"><div class="pg-sec">Food</div><div class="pg-num">Page 3</div><div class="pg-file">menu/page-3.jpg</div></div></div>
+      </div>
+    </div>
+    <div class="mb-edge mb-edge--prev" data-turn="prev" role="button" tabindex="0" aria-label="Previous page"></div>
+    <div class="mb-edge mb-edge--next" data-turn="next" role="button" tabindex="0" aria-label="Next page"></div>
+  </div>
+  <div class="menu-veil"></div>
+  <div class="mb-nav mb-nav--prev" data-turn="prev"></div>
+  <div class="mb-nav mb-nav--next" data-turn="next"></div>
+
+  <div></div>
+  <div class="caption">
+    <div class="steps"><i class="on"></i><i class="on"></i><i></i></div>
+    <div class="eyebrow">Order</div>
+    <div class="title-swap">
+      <h1 class="room-name hide-late">Ordering food</h1>
+      <h1 class="room-name reveal-late">The menu</h1>
+    </div>
+  </div>
+  <div class="cta reveal-late">
+    <span class="cta-link cta-link--quiet">(link-goto: "Continue", "Order Done Scene")</span>
+  </div>
+</div>
+}
+
+:: Order Done Scene {"position":"400,675","size":"100,100"}
+{
+(if: $first is "")[(set: $first to "order")]
+<div class="scene-cue" data-scene="orderdone" data-loop="0"></div>
+
+<div class="stage">
+  <div></div>
+  <div class="caption">
+    <div class="steps"><i class="on"></i><i class="on"></i><i class="on"></i></div>
+    <div class="eyebrow">Order</div>
+    <h1 class="room-name">Order done</h1>
+  </div>
+  <div></div>
+</div>
+
+(if: $first is "order")[<span class="auto-advance">(link-goto: "continue", "Only Tour Left")</span>]
+(else:)[<span class="auto-advance">(link-goto: "continue", "Ending Scene")</span>]
+(after: $safety)[(if: $first is "order")[(go-to: "Only Tour Left")](else:)[(go-to: "Ending Scene")]]
+}
+
+:: Only Tour Left {"position":"250,750","size":"100,100"}
+{
+<div class="scene-cue" data-scene="choose" data-loop="1"></div>
+
+<div class="stage">
+  <div></div>
+  <div class="caption">
+    <div class="eyebrow">Order placed</div>
+    <h1 class="room-name">Now, take a look around</h1>
+  </div>
+  <div class="cta">
+    <span class="cta-link">(link-goto: "Look around", "Balcony Area Scene")</span>
+  </div>
+</div>
+}
+
+:: Balcony Area Scene {"position":"850,300","size":"100,100"}
+{
+(if: $first is "")[(set: $first to "tour")]
+<div class="scene-cue" data-scene="balcony" data-loop="0"></div>
+
+<div class="stage">
+  <div></div>
+  <div class="caption">
+    <div class="steps"><i class="on"></i><i></i><i></i><i></i></div>
+    <div class="eyebrow">Look around</div>
+    <h1 class="room-name">Balcony</h1>
+    <p class="room-note">Airy and serene, with soft diffused light filtering through the glass walls and a single potted tree grounding the minimalist seating.</p>
+  </div>
+  <div class="cta">
+    <span class="cta-link cta-link--quiet">(link-goto: "Skip tour", "Skip Tour")</span>
+  </div>
+</div>
+
+<div class="side-nav">
+  <span class="side-zone side-zone--back">(if: $first is "order")[(link-goto: "Back", "Only Tour Left")](else:)[(link-goto: "Back", "Choose Route")]</span>
+  <span class="side-zone side-zone--next">(link-goto: "Next", "2FL Area Scene")</span>
+  <div class="side-hint"><span class="t-click">Click the left or right side of the screen to go back or forward.</span><span class="t-tap">Tap the left or right side of the screen to go back or forward.</span></div>
+</div>
+
+<span class="auto-advance">(link-goto: "continue", "2FL Area Scene")</span>
+(after: $safety)[(go-to: "2FL Area Scene")]
+}
+
+:: 2FL Area Scene {"position":"850,450","size":"100,100"}
+{
+(if: $first is "")[(set: $first to "tour")]
+<div class="scene-cue" data-scene="floor2" data-loop="0"></div>
+
+<div class="stage">
+  <div></div>
+  <div class="caption">
+    <div class="steps"><i class="on"></i><i class="on"></i><i></i><i></i></div>
+    <div class="eyebrow">Look around</div>
+    <h1 class="room-name">Second floor</h1>
+    <p class="room-note">Warm and sociable, bathed in natural light from oversized arched windows that frame a wall of greenery outside.</p>
+  </div>
+  <div class="cta">
+    <span class="cta-link cta-link--quiet">(link-goto: "Skip tour", "Skip Tour")</span>
+  </div>
+</div>
+
+<div class="side-nav">
+  <span class="side-zone side-zone--back">(link-goto: "Back", "Balcony Area Scene")</span>
+  <span class="side-zone side-zone--next">(link-goto: "Next", "GFL Area 1 Scene")</span>
+  <div class="side-hint"><span class="t-click">Click the left or right side of the screen to go back or forward.</span><span class="t-tap">Tap the left or right side of the screen to go back or forward.</span></div>
+</div>
+
+<span class="auto-advance">(link-goto: "continue", "GFL Area 1 Scene")</span>
+(after: $safety)[(go-to: "GFL Area 1 Scene")]
+}
+
+:: GFL Area 1 Scene {"position":"850,600","size":"100,100"}
+{
+(if: $first is "")[(set: $first to "tour")]
+<div class="scene-cue" data-scene="gfl1" data-loop="0"></div>
+
+<div class="stage">
+  <div></div>
+  <div class="caption">
+    <div class="steps"><i class="on"></i><i class="on"></i><i class="on"></i><i></i></div>
+    <div class="eyebrow">Look around</div>
+    <h1 class="room-name">Ground floor, one</h1>
+    <p class="room-note">Sleek and modern, anchored by a bold glass-and-chrome island bar that gives the space a striking centerpiece.</p>
+  </div>
+  <div class="cta">
+    <span class="cta-link cta-link--quiet">(link-goto: "Skip tour", "Skip Tour")</span>
+  </div>
+</div>
+
+<div class="side-nav">
+  <span class="side-zone side-zone--back">(link-goto: "Back", "2FL Area Scene")</span>
+  <span class="side-zone side-zone--next">(link-goto: "Next", "GFL Area 2 Scene")</span>
+  <div class="side-hint"><span class="t-click">Click the left or right side of the screen to go back or forward.</span><span class="t-tap">Tap the left or right side of the screen to go back or forward.</span></div>
+</div>
+
+<span class="auto-advance">(link-goto: "continue", "GFL Area 2 Scene")</span>
+(after: $safety)[(go-to: "GFL Area 2 Scene")]
+}
+
+:: GFL Area 2 Scene {"position":"850,750","size":"100,100"}
+{
+(if: $first is "")[(set: $first to "tour")]
+<div class="scene-cue" data-scene="gfl2" data-loop="0"></div>
+
+<div class="stage">
+  <div></div>
+  <div class="caption">
+    <div class="steps"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></div>
+    <div class="eyebrow">Look around</div>
+    <h1 class="room-name">Ground floor, two</h1>
+    <p class="room-note">Busy and inviting, with a sculptural tiered column marking the order counter and warm archways leading into cozy lounge nooks beyond.</p>
+  </div>
+  <div class="cta">
+    <span class="cta-link cta-link--quiet">(link-goto: "Skip tour", "Skip Tour")</span>
+  </div>
+</div>
+
+<div class="side-nav">
+  <span class="side-zone side-zone--back">(link-goto: "Back", "GFL Area 1 Scene")</span>
+  <span class="side-zone side-zone--next">(if: $first is "tour")[(link-goto: "Next", "Only Order Left")](else:)[(link-goto: "Next", "Ending Scene")]</span>
+  <div class="side-hint"><span class="t-click">Click the left or right side of the screen to go back or forward.</span><span class="t-tap">Tap the left or right side of the screen to go back or forward.</span></div>
+</div>
+
+(if: $first is "tour")[<span class="auto-advance">(link-goto: "continue", "Only Order Left")</span>]
+(else:)[<span class="auto-advance">(link-goto: "continue", "Ending Scene")</span>]
+(after: $safety)[(if: $first is "tour")[(go-to: "Only Order Left")](else:)[(go-to: "Ending Scene")]]
+}
+
+:: Only Order Left {"position":"850,900","size":"100,100"}
+{
+<div class="scene-cue" data-scene="choose" data-loop="1"></div>
+
+<div class="stage">
+  <div></div>
+  <div class="caption">
+    <div class="eyebrow">Tour complete</div>
+    <h1 class="room-name">Ready to order?</h1>
+  </div>
+  <div class="cta">
+    <span class="cta-link">(link-goto: "Order food", "Waiting In Line Scene")</span>
+  </div>
+</div>
+}
+
+:: Skip Tour {"position":"1050,600","size":"100,100"}
+{
+<!-- Tour first: skipping lands on ordering. Order first: skipping lands on the ending. -->
+(if: $first is "tour")[(go-to: "Waiting In Line Scene")](else:)[(go-to: "Ending Scene")]
+}
+
+:: Ending Scene {"position":"550,1050","size":"100,100"}
+{
+<div class="scene-cue" data-scene="ending" data-loop="1"></div>
+
+<div class="stage">
+  <div></div>
+  <div class="caption">
+    <div class="eyebrow">Thank you</div>
+    <h1 class="room-name">(print: $cafe)</h1>
+    <p class="room-note">See you soon.</p>
+  </div>
+  <div class="cta">
+    <span class="cta-link cta-link--quiet">(link-goto: "Watch again", "Opening Scene")</span>
+  </div>
+</div>
+}
+
+:: init [startup] {"position":"100,300","size":"100,100"}
+<!--
+  Runs once before the first passage.
+  $cafe   the name shown on the Opening and Ending scenes
+  $first  which stretch the viewer picked first: "" then "order" or "tour"
+  $safety fallback timer. If a clip never reports it has ended, the story
+          moves on after this long. Keep it longer than your longest clip.
+-->
+(set: $cafe to "Concordia’s Cafe")
+(set: $first to "")
+(set: $safety to 60s)
+
+:: menu-bridge [header] {"position":"100,450","size":"100,100"}
+<div class="jump-bridge" aria-hidden="true"><span class="here">(print: (passage:)'s name)</span>(link-goto: "Opening Scene", "Opening Scene")(link-goto: "Choose Route", "Choose Route")(link-goto: "Waiting In Line Scene", "Waiting In Line Scene")(link-goto: "Food Menu Scene", "Food Menu Scene")(link-goto: "Order Done Scene", "Order Done Scene")(link-goto: "Balcony Area Scene", "Balcony Area Scene")(link-goto: "2FL Area Scene", "2FL Area Scene")(link-goto: "GFL Area 1 Scene", "GFL Area 1 Scene")(link-goto: "GFL Area 2 Scene", "GFL Area 2 Scene")(link-goto: "Ending Scene", "Ending Scene")</div>
